@@ -36,6 +36,10 @@ public class AiAnalysisService {
     private final String openRouterApiKey;
     private final String openRouterModel;
     private final String openRouterBaseUrl;
+    private final String ollamaApiKey;
+    private final String ollamaModel;
+    private final String ollamaBaseUrl;
+    private final boolean preferOllama;
     private final String groqApiKey;
     private final String groqBaseUrl;
     private final String transcriptionModel;
@@ -52,6 +56,10 @@ public class AiAnalysisService {
             @Value("${openrouter.api-key:${OPENROUTER_API_KEY:}}") String openRouterApiKey,
             @Value("${openrouter.model:${OPENROUTER_MODEL:openai/gpt-4o-mini}}") String openRouterModel,
             @Value("${openrouter.base-url:${OPENROUTER_BASE_URL:https://openrouter.ai/api/v1}}") String openRouterBaseUrl,
+            @Value("${ollama.api-key:${OLLAMA_API_KEY:${OPENROUTER_API_KEY:}}}") String ollamaApiKey,
+            @Value("${ollama.model:${OLLAMA_MODEL:llama3.1:8b}}") String ollamaModel,
+            @Value("${ollama.base-url:${OLLAMA_BASE_URL:http://localhost:11434/v1}}") String ollamaBaseUrl,
+            @Value("${app.ai.prefer-ollama:${APP_AI_PREFER_OLLAMA:false}}") boolean preferOllama,
                 @Value("${groq.api-key:${GROQ_API_KEY:}}") String groqApiKey,
                 @Value("${groq.base-url:${GROQ_BASE_URL:https://api.groq.com/openai/v1}}") String groqBaseUrl,
                 @Value("${app.ai.transcription-model:${GROQ_TRANSCRIPTION_MODEL:whisper-large-v3-turbo}}") String transcriptionModel,
@@ -66,6 +74,10 @@ public class AiAnalysisService {
         this.openRouterApiKey = openRouterApiKey;
         this.openRouterModel = openRouterModel;
         this.openRouterBaseUrl = openRouterBaseUrl;
+        this.ollamaApiKey = ollamaApiKey;
+        this.ollamaModel = ollamaModel;
+        this.ollamaBaseUrl = ollamaBaseUrl;
+        this.preferOllama = preferOllama;
         this.groqApiKey = groqApiKey;
         this.groqBaseUrl = groqBaseUrl;
         this.transcriptionModel = transcriptionModel;
@@ -74,8 +86,9 @@ public class AiAnalysisService {
     }
 
     public AnalyzeResponse analyze(AnalyzeRequest request) {
-        ProviderConfig provider = resolveProvider();
-        if (provider == null) {
+        ProviderConfig provider = resolvePreferredProvider();
+        ProviderConfig fallbackProvider = resolveProviderFallbackFor(provider);
+        if (provider == null && fallbackProvider == null) {
             return new AnalyzeResponse(
                     "Start by handling one simple test case end-to-end, then generalize with edge cases.",
                     "AI analysis is unavailable because API key is not configured. Set OPENROUTER_API_KEY (or GROK_API_KEY/GROQ_API_KEY/ANTHROPIC_API_KEY)."
@@ -128,8 +141,8 @@ public class AiAnalysisService {
                 + " Test Summary: " + safe(request.testSummary())
                 + " Code: " + safe(request.code());
 
-        String hint = callAi(hintPrompt, provider);
-        String analysis = callAi(analysisPrompt, provider);
+        String hint = callAiWithFallback(hintPrompt, provider, fallbackProvider);
+        String analysis = callAiWithFallback(analysisPrompt, provider, fallbackProvider);
 
         if (isAiFailure(hint) || isAiFailure(analysis)) {
             return new AnalyzeResponse(
@@ -147,8 +160,9 @@ public class AiAnalysisService {
         String verdict = likelyCorrect ? "CORRECT" : "NEEDS_FIX";
         String action = safe(request.action()).toUpperCase();
 
-        ProviderConfig provider = resolveProvider();
-        if (provider == null) {
+        ProviderConfig provider = resolvePreferredProvider();
+        ProviderConfig fallbackProvider = resolveProviderFallbackFor(provider);
+        if (provider == null && fallbackProvider == null) {
             String fallbackReply = buildOfflineChatbotReply(request, passStatus, likelyCorrect);
             return new ChatbotAnalyzeResponse(
                     fallbackReply,
@@ -192,7 +206,7 @@ public class AiAnalysisService {
                 + "Status Hint: " + statusLine + "\n"
                 + "Code:\n" + safe(request.code());
 
-        String rawReply = callAi(prompt, provider);
+        String rawReply = callAiWithFallback(prompt, provider, fallbackProvider);
         if (isAiFailure(rawReply)) {
             return new ChatbotAnalyzeResponse(
                     buildOfflineChatbotReply(request, passStatus, likelyCorrect),
@@ -216,13 +230,14 @@ public class AiAnalysisService {
     }
 
     public String generateText(String systemPrompt, String userPrompt) {
-        ProviderConfig provider = resolveProvider();
-        if (provider == null) {
+        ProviderConfig provider = resolvePreferredProvider();
+        ProviderConfig fallbackProvider = resolveProviderFallbackFor(provider);
+        if (provider == null && fallbackProvider == null) {
             return "AI response unavailable right now.";
         }
 
         String mergedPrompt = "System Instructions:\n" + safe(systemPrompt) + "\n\nUser Prompt:\n" + safe(userPrompt);
-        return callAi(mergedPrompt, provider);
+        return callAiWithFallback(mergedPrompt, provider, fallbackProvider);
     }
 
     public String transcribeAudio(byte[] audioBytes, String originalFilename, String contentType) {
@@ -349,7 +364,11 @@ public class AiAnalysisService {
     }
 
     private String callAi(String userPrompt, ProviderConfig provider) {
-        if (provider == null || provider.apiKey() == null || provider.apiKey().isBlank()) {
+        if (provider == null) {
+            return "AI response unavailable right now.";
+        }
+
+        if (provider.anthropic() && (provider.apiKey() == null || provider.apiKey().isBlank())) {
             return "AI response unavailable right now.";
         }
 
@@ -358,6 +377,20 @@ public class AiAnalysisService {
         }
 
         return callOpenAiCompatible(userPrompt, provider.apiKey(), provider.baseUrl(), provider.model(), provider.openRouter());
+    }
+
+    private String callAiWithFallback(String userPrompt, ProviderConfig primaryProvider, ProviderConfig fallbackProvider) {
+        String first = callAi(userPrompt, primaryProvider);
+        if (!isAiFailure(first)) {
+            return first;
+        }
+
+        if (fallbackProvider == null || fallbackProvider.equals(primaryProvider)) {
+            return first;
+        }
+
+        String second = callAi(userPrompt, fallbackProvider);
+        return isAiFailure(second) ? first : second;
     }
 
     private String callOpenAiCompatible(String userPrompt, String activeKey, String activeBaseUrl, String activeModel, boolean openRouter) {
@@ -376,8 +409,11 @@ public class AiAnalysisService {
                 HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
                     .uri(URI.create(activeBaseUrl + "/chat/completions"))
                     .timeout(Duration.ofSeconds(45))
-                    .header("Authorization", "Bearer " + activeKey)
                     .header("Content-Type", "application/json");
+
+                if (activeKey != null && !activeKey.isBlank()) {
+                    requestBuilder.header("Authorization", "Bearer " + activeKey);
+                }
 
                 if (openRouter) {
                 requestBuilder.header("HTTP-Referer", "http://localhost:5173");
@@ -461,6 +497,21 @@ public class AiAnalysisService {
             return new ProviderConfig(anthropicApiKey, anthropicBaseUrl, anthropicModel, true, false);
         }
         return null;
+    }
+
+    private ProviderConfig resolvePreferredProvider() {
+        if (preferOllama && ollamaBaseUrl != null && !ollamaBaseUrl.isBlank() && ollamaModel != null && !ollamaModel.isBlank()) {
+            return new ProviderConfig(ollamaApiKey, ollamaBaseUrl, ollamaModel, false, false);
+        }
+        return resolveProvider();
+    }
+
+    private ProviderConfig resolveProviderFallbackFor(ProviderConfig primaryProvider) {
+        ProviderConfig defaultProvider = resolveProvider();
+        if (defaultProvider == null || defaultProvider.equals(primaryProvider)) {
+            return null;
+        }
+        return defaultProvider;
     }
 
     private ProviderConfig resolveTranscriptionProvider() {

@@ -27,6 +27,7 @@ export default function InterviewSection() {
     const syncTimerRef = useRef(null);
     const faceMonitorRef = useRef(null);
     const fallbackMonitorRef = useRef(null);
+    const visibilityLockTimeoutRef = useRef(null);
     const fallbackPrevFrameRef = useRef(null);
     const proctorViolationRef = useRef(false);
     const multiFaceActiveRef = useRef(false);
@@ -240,15 +241,25 @@ export default function InterviewSection() {
         };
 
         const lockInterview = () => {
-            setInterviewLocked(true);
             setHandsFreeMode(false);
             stopListening();
             stopAudioRecording();
+            setProctorAlert("Tab/background switch detected. Please stay on this interview screen.");
         };
 
         const onVisibilityChange = () => {
-            if (document.visibilityState !== "visible") {
-                lockInterview();
+            if (document.visibilityState === "hidden") {
+                if (visibilityLockTimeoutRef.current) {
+                    clearTimeout(visibilityLockTimeoutRef.current);
+                }
+                visibilityLockTimeoutRef.current = setTimeout(() => {
+                    if (document.visibilityState === "hidden") {
+                        lockInterview();
+                    }
+                }, 2500);
+            } else if (visibilityLockTimeoutRef.current) {
+                clearTimeout(visibilityLockTimeoutRef.current);
+                visibilityLockTimeoutRef.current = null;
             }
         };
 
@@ -257,16 +268,18 @@ export default function InterviewSection() {
         document.addEventListener("cut", blockEvent);
         document.addEventListener("contextmenu", blockEvent);
         window.addEventListener("keydown", onKeyDown);
-        window.addEventListener("blur", lockInterview);
         document.addEventListener("visibilitychange", onVisibilityChange);
 
         return () => {
+            if (visibilityLockTimeoutRef.current) {
+                clearTimeout(visibilityLockTimeoutRef.current);
+                visibilityLockTimeoutRef.current = null;
+            }
             document.removeEventListener("copy", blockEvent);
             document.removeEventListener("paste", blockEvent);
             document.removeEventListener("cut", blockEvent);
             document.removeEventListener("contextmenu", blockEvent);
             window.removeEventListener("keydown", onKeyDown);
-            window.removeEventListener("blur", lockInterview);
             document.removeEventListener("visibilitychange", onVisibilityChange);
         };
     }, [sessionId, report, interviewLocked]);
@@ -276,18 +289,32 @@ export default function InterviewSection() {
             return Promise.resolve();
         }
         return new Promise((resolve) => {
+            let settled = false;
+            const finish = () => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                setAiSpeaking(false);
+                resolve();
+            };
+
+            const timeout = setTimeout(() => {
+                finish();
+            }, 5000);
+
             const utterance = new SpeechSynthesisUtterance(text);
             utterance.lang = "en-US";
             utterance.rate = 1;
             utterance.pitch = 1;
             utterance.onstart = () => setAiSpeaking(true);
             utterance.onend = () => {
-                setAiSpeaking(false);
-                resolve();
+                clearTimeout(timeout);
+                finish();
             };
             utterance.onerror = () => {
-                setAiSpeaking(false);
-                resolve();
+                clearTimeout(timeout);
+                finish();
             };
             window.speechSynthesis.cancel();
             window.speechSynthesis.speak(utterance);
@@ -296,9 +323,9 @@ export default function InterviewSection() {
 
     const startCamera = async () => {
         if (!navigator.mediaDevices?.getUserMedia) {
-            setError("Camera API is unavailable in this browser. Use Chrome/Edge over localhost or HTTPS.");
+            setError("Camera API is unavailable in this browser. Interview will continue without camera analysis.");
             setCameraReady(false);
-            return false;
+            return true;
         }
 
         try {
@@ -306,15 +333,25 @@ export default function InterviewSection() {
             streamRef.current = stream;
             if (videoRef.current) {
                 videoRef.current.srcObject = stream;
+                const playPromise = videoRef.current.play?.();
+                if (playPromise && typeof playPromise.catch === "function") {
+                    playPromise.catch(() => {});
+                }
             }
             setCameraReady(true);
+            setError("");
             runVideoHeuristics();
             return true;
-        } catch {
+        } catch (error) {
             setCameraReady(false);
-            setError("Camera permission is required for interview mode.");
-            return false;
+            const reason = error?.name ? ` (${error.name})` : "";
+            setError(`Camera start failed${reason}. Allow camera permission and click Enable Camera.`);
+            return true;
         }
+    };
+
+    const handleEnableCamera = async () => {
+        await startCamera();
     };
 
     const stopCamera = () => {
@@ -378,7 +415,6 @@ export default function InterviewSection() {
                     } else {
                         proctorViolationRef.current = true;
                         setProctorAlert("Multiple-face violation exceeded limit. Interview has been terminated.");
-                        setInterviewLocked(true);
                         await handleEndSession();
                     }
                     return;
@@ -715,10 +751,6 @@ export default function InterviewSection() {
         setLoading(true);
         setError("");
         try {
-            const cameraStarted = await startCamera();
-            if (!cameraStarted) {
-                return;
-            }
             proctorViolationRef.current = false;
             multiFaceActiveRef.current = false;
             multiFaceWarningCountRef.current = 0;
@@ -732,9 +764,10 @@ export default function InterviewSection() {
             setLiveFeed([]);
             setTranscript("");
             setRecognitionConfidence([]);
-            await speakText(data.currentQuestion || "Let's begin the interview.");
-        } catch {
-            setError("Unable to start interview session. Please check backend and API setup.");
+            void startCamera();
+            void speakText(data.currentQuestion || "Let's begin the interview.");
+        } catch (error) {
+            setError(error?.message || "Unable to start interview session. Please check backend and API setup.");
         } finally {
             setLoading(false);
         }
@@ -810,18 +843,18 @@ export default function InterviewSection() {
                 setReport(response.finalReport);
                 setCurrentQuestion("");
                 stopListening();
-                await speakText("Interview is completed. Your report is ready.");
+                void speakText("Interview is completed. Your report is ready.");
                 return;
             }
 
             setCurrentQuestion(response.currentQuestion || "");
             const aiVoiceLine = [response.interviewerResponse, response.currentQuestion].filter(Boolean).join(" ");
-            await speakText(aiVoiceLine);
+            void speakText(aiVoiceLine);
             if (handsFreeMode && !interviewLocked) {
                 startListening();
             }
-        } catch {
-            setError("Unable to evaluate answer right now.");
+        } catch (error) {
+            setError(error?.message || "Unable to evaluate answer right now.");
         } finally {
             setLoading(false);
         }
@@ -839,9 +872,9 @@ export default function InterviewSection() {
             setCurrentQuestion("");
             setHandsFreeMode(false);
             stopListening();
-            await speakText("Interview ended. Final report generated.");
-        } catch {
-            setError("Unable to end session right now.");
+            void speakText("Interview ended. Final report generated.");
+        } catch (error) {
+            setError(error?.message || "Unable to end session right now.");
         } finally {
             setLoading(false);
         }
@@ -1028,6 +1061,16 @@ export default function InterviewSection() {
                                 <div>Eye Contact: {videoMetrics.eyeContact.toFixed(1)}/10</div>
                                 <div>Body Language: {videoMetrics.bodyLanguage.toFixed(1)}/10</div>
                             </div>
+
+                            {!cameraReady && (
+                                <button
+                                    onClick={handleEnableCamera}
+                                    disabled={loading}
+                                    className="w-full mt-3 px-4 py-2 rounded-md text-xs bg-[#313244] text-[#cdd6f4] disabled:opacity-50"
+                                >
+                                    Enable Camera
+                                </button>
+                            )}
 
                             <button
                                 onClick={handleEndSession}

@@ -2,7 +2,7 @@ import { useNavigate } from "react-router-dom";
 
 export default function SiteNavbar({ active = "home" }) {
   const navigate = useNavigate();
-  const openCvChecker = () => window.location.assign("https://cv-reader-6m3ucrqgl6amka54uxqmnz.streamlit.app/");
+  const openCvChecker = () => navigate("/cv-checker");
 
   const navClass = (name) =>
     `px-3 py-2 rounded-lg text-sm transition-all ${

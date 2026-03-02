@@ -6,17 +6,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.text.PDFTextStripper;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -57,22 +51,14 @@ public class CvAnalysisService {
     ));
 
     private final ObjectMapper objectMapper;
-    private final HttpClient httpClient;
-    private final String grokApiKey;
-    private final String grokModel;
-    private final String grokBaseUrl;
+    private final AiAnalysisService aiAnalysisService;
 
     public CvAnalysisService(
             ObjectMapper objectMapper,
-            @Value("${grok.api-key:${GROK_API_KEY:${groq.api-key:${GROQ_API_KEY:}}}}") String grokApiKey,
-            @Value("${grok.model:${groq.model:grok-3-mini}}") String grokModel,
-            @Value("${grok.base-url:${groq.base-url:https://api.x.ai/v1}}") String grokBaseUrl
+            AiAnalysisService aiAnalysisService
     ) {
         this.objectMapper = objectMapper;
-        this.httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(20)).build();
-        this.grokApiKey = grokApiKey;
-        this.grokModel = grokModel;
-        this.grokBaseUrl = grokBaseUrl;
+        this.aiAnalysisService = aiAnalysisService;
     }
 
     public CvAnalyzeResponse analyze(MultipartFile resumeFile, String resumeText, String jdText) {
@@ -107,7 +93,7 @@ public class CvAnalysisService {
         List<String> recommendations = buildRecommendations(missingKeywords, projects, extractedResume);
         String aiSummary = "Structured ATS analysis generated using deterministic scoring.";
 
-        Map<String, Object> aiData = callGrokEnhancement(extractedResume, normalizedJd, missingKeywords, recommendations);
+        Map<String, Object> aiData = callAiEnhancement(extractedResume, normalizedJd, missingKeywords, recommendations);
         if (!aiData.isEmpty()) {
             aiSummary = getString(aiData.get("summary"), aiSummary);
             recommendations = mergeRecommendations(recommendations, asStringList(aiData.get("recommendations"), 4));
@@ -379,16 +365,12 @@ public class CvAnalysisService {
         return out.stream().distinct().limit(6).toList();
     }
 
-    private Map<String, Object> callGrokEnhancement(
+    private Map<String, Object> callAiEnhancement(
             String resumeText,
             String jdText,
             List<String> missingKeywords,
             List<String> recommendations
     ) {
-        if (grokApiKey == null || grokApiKey.isBlank()) {
-            return Map.of();
-        }
-
         String prompt = "You are an ATS and resume optimization expert. Return STRICT JSON only with keys: "
                 + "summary (string), recommendations (array of max 4 strings), resumeLevel (Beginner|Intermediate|Advanced|Expert), "
                 + "projectLevel (Beginner|Intermediate|Advanced).\\n"
@@ -398,44 +380,43 @@ public class CvAnalysisService {
                 + "Existing Recommendations: " + String.join(" | ", recommendations);
 
         try {
-            Map<String, Object> payload = Map.of(
-                    "model", grokModel,
-                    "temperature", 0.2,
-                    "messages", List.of(
-                            Map.of("role", "system", "content", "You return valid JSON only."),
-                            Map.of("role", "user", "content", prompt)
-                    )
+            String content = aiAnalysisService.generateText(
+                    "You return valid JSON only.",
+                    prompt
             );
-
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(grokBaseUrl + "/chat/completions"))
-                    .timeout(Duration.ofSeconds(45))
-                    .header("Authorization", "Bearer " + grokApiKey)
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(payload)))
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() >= 400) {
-                return Map.of();
-            }
-
-            String content = objectMapper.readTree(response.body())
-                    .path("choices")
-                    .path(0)
-                    .path("message")
-                    .path("content")
-                    .asText("");
 
             if (content.isBlank()) {
                 return Map.of();
             }
 
-            return objectMapper.readValue(content, new TypeReference<Map<String, Object>>() {
+            String jsonCandidate = extractJsonObject(content);
+            if (jsonCandidate.isBlank()) {
+                return Map.of();
+            }
+
+            return objectMapper.readValue(jsonCandidate, new TypeReference<Map<String, Object>>() {
             });
         } catch (Exception ex) {
             return Map.of();
         }
+    }
+
+    private String extractJsonObject(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return "";
+        }
+
+        String trimmed = raw.trim();
+        if (trimmed.startsWith("```") && trimmed.endsWith("```")) {
+            trimmed = trimmed.replaceFirst("^```(?:json)?", "").replaceFirst("```$", "").trim();
+        }
+
+        int start = trimmed.indexOf('{');
+        int end = trimmed.lastIndexOf('}');
+        if (start >= 0 && end > start) {
+            return trimmed.substring(start, end + 1);
+        }
+        return trimmed;
     }
 
     private String normalize(String input) {

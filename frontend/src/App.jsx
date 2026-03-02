@@ -3,6 +3,7 @@ import Home from "./Home";
 import CodeWindow from "./codewindow";
 import InterviewSection from "./InterviewSection";
 import TechnicalSession from "./TechnicalSession";
+import CvChecker from "./CvChecker";
 
 function App() {
   return (
@@ -12,6 +13,7 @@ function App() {
         <Route path="/problem/:id" element={<CodeWindow />} />
         <Route path="/interview" element={<InterviewSection />} />
         <Route path="/technical-session" element={<TechnicalSession />} />
+        <Route path="/cv-checker" element={<CvChecker />} />
       </Routes>
     </BrowserRouter>
   );

@@ -2,7 +2,7 @@ import { useNavigate } from "react-router-dom";
 
 export default function Home() {
   const navigate = useNavigate();
-  const openCvChecker = () => window.location.assign("https://cv-reader-6m3ucrqgl6amka54uxqmnz.streamlit.app/");
+  const openCvChecker = () => navigate("/cv-checker");
   const circleButtonClass = "w-36 h-36 sm:w-40 sm:h-40 md:w-48 md:h-48 rounded-full bg-white/95 shadow-lg flex items-center justify-center text-emerald-700 font-semibold hover:scale-[1.03] transition-all duration-200 text-center p-4";
 
   return (
