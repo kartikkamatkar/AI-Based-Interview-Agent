@@ -3,6 +3,8 @@ package com.enigma.backend.interview;
 import com.enigma.backend.ai.AiAnalysisService;
 import com.enigma.backend.interview.dto.InterviewAnswerRequest;
 import com.enigma.backend.interview.dto.InterviewFinalReport;
+import com.enigma.backend.interview.dto.InterviewProctorEventRequest;
+import com.enigma.backend.interview.dto.InterviewProctorEventResponse;
 import com.enigma.backend.interview.dto.InterviewSessionStateResponse;
 import com.enigma.backend.interview.dto.InterviewStartResponse;
 import com.enigma.backend.interview.dto.InterviewTurnResponse;
@@ -82,6 +84,10 @@ public class InterviewService {
         synchronized (session) {
             if (session.isEnded() || sessionTimer.isExpired(session.getEndsAt())) {
                 InterviewFinalReport report = finalizeSession(session);
+                String endedReason = safe(session.getTerminationReason());
+                String endedMessage = endedReason.isBlank()
+                        ? "Time completed or all questions covered."
+                        : endedReason;
                 return new InterviewTurnResponse(
                         sessionId,
                         sessionTimer.secondsRemaining(session.getEndsAt()),
@@ -89,7 +95,7 @@ public class InterviewService {
                         session.askedQuestionsCount(),
                         questionManager.totalQuestions(),
                         "Session ended.",
-                        "Time completed or all questions covered.",
+                        endedMessage,
                         true,
                         report
                 );
@@ -171,6 +177,48 @@ public class InterviewService {
         }
     }
 
+    public InterviewProctorEventResponse reportProctorEvent(String sessionId, InterviewProctorEventRequest request) {
+        InterviewSession session = getSessionOrThrow(sessionId);
+
+        synchronized (session) {
+            String eventType = safe(request == null ? "" : request.eventType()).trim().toUpperCase(Locale.ROOT);
+            if (eventType.isBlank()) {
+                throw new IllegalArgumentException("eventType is required.");
+            }
+
+            String details = safe(request == null ? "" : request.details()).trim();
+            boolean forceTerminate = request != null && Boolean.TRUE.equals(request.terminateSession());
+
+            session.incrementProctorViolationCount();
+            String auditLine = Instant.now() + " | " + eventType + (details.isBlank() ? "" : " | " + details);
+            session.getProctorEvents().add(auditLine);
+
+            boolean terminate = forceTerminate || isCriticalProctorEvent(eventType) || session.getProctorViolationCount() >= 3;
+            if (!terminate) {
+                return new InterviewProctorEventResponse(
+                        sessionId,
+                        session.getProctorViolationCount(),
+                        session.isEnded(),
+                        safe(session.getTerminationReason()),
+                        null
+                );
+            }
+
+            String reason = details.isBlank()
+                    ? ("Session terminated due to proctoring violation: " + eventType)
+                    : details;
+            session.setTerminationReason(reason);
+            InterviewFinalReport report = finalizeSession(session);
+            return new InterviewProctorEventResponse(
+                    sessionId,
+                    session.getProctorViolationCount(),
+                    true,
+                    reason,
+                    report
+            );
+        }
+    }
+
     private void moveToNextBaseQuestion(InterviewSession session) {
         while (session.getQuestionIndex() < session.getQuestionBank().size()) {
             String candidate = safe(session.getQuestionBank().get(session.getQuestionIndex())).trim();
@@ -221,9 +269,69 @@ public class InterviewService {
     }
 
     private InterviewFinalReport finalizeSession(InterviewSession session) {
+        if (session.getFinalReport() != null) {
+            return session.getFinalReport();
+        }
+
         session.setEnded(true);
         session.setCurrentQuestion("");
-        return feedbackGenerator.generate(session.getEvaluations());
+        InterviewFinalReport baseReport;
+        try {
+            baseReport = feedbackGenerator.generate(session.getEvaluations());
+        } catch (Exception ex) {
+            baseReport = new InterviewFinalReport(
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    "Interview ended, but report generation failed.",
+                    "Unable to compute detailed scoring due to a server issue.",
+                    "Retry another mock interview after backend AI configuration is stable.",
+                    "Practice concise STAR-based responses and record mock answers daily."
+            );
+        }
+
+        InterviewFinalReport finalReport = safe(session.getTerminationReason()).isBlank()
+                ? baseReport
+                : applyProctorPenalty(baseReport, session.getProctorViolationCount(), session.getTerminationReason());
+
+        session.setFinalReport(finalReport);
+        return finalReport;
+    }
+
+    private boolean isCriticalProctorEvent(String eventType) {
+        return "TAB_SWITCH".equals(eventType)
+                || "WINDOW_BLUR".equals(eventType)
+                || "FULLSCREEN_EXIT".equals(eventType)
+                || "MULTI_FACE_EXCEEDED".equals(eventType)
+                || "CAMERA_OFF".equals(eventType)
+                || "CAMERA_PERMISSION_DENIED".equals(eventType);
+    }
+
+    private InterviewFinalReport applyProctorPenalty(InterviewFinalReport report, int violationCount, String reason) {
+        double penalty = Math.min(2.0, 0.4 * Math.max(1, violationCount));
+        double adjustedFinalScore = Math.max(0.0, round1(report.finalScore() - penalty));
+
+        String violationNote = "\n\nProctoring Outcome: " + reason + " (violations: " + violationCount + ")";
+
+        return new InterviewFinalReport(
+                adjustedFinalScore,
+                report.communicationSkills(),
+                report.confidenceLevel(),
+                report.facialExpression(),
+                report.eyeContact(),
+                report.toneAndClarity(),
+                report.bodyLanguage(),
+                report.professionalism(),
+                report.strengths(),
+                report.areasOfImprovement() + violationNote,
+                report.howToImprove() + "\n- Maintain strict interview integrity (no tab switch/fullscreen exit).",
+                report.suggestedPracticePlan()
+        );
     }
 
     private TurnAiEvaluation evaluateTurnWithAi(String askedQuestion, String transcript) {

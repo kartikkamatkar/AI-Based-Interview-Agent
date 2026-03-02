@@ -46,6 +46,15 @@ export async function endInterviewSession(sessionId) {
     }
 }
 
+export async function reportInterviewProctorEvent(sessionId, payload) {
+    try {
+        const { data } = await axios.post(`${BACKEND_URL}/api/interview/session/${sessionId}/proctor-event`, payload);
+        return data?.data;
+    } catch (error) {
+        throw extractApiError(error, "Unable to report proctor event.");
+    }
+}
+
 export async function transcribeInterviewAudio(audioInput) {
     const formData = new FormData();
     const isFile = audioInput instanceof File;

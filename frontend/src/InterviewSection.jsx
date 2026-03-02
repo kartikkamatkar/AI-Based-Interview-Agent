@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import {
     endInterviewSession,
     getInterviewSessionState,
+    reportInterviewProctorEvent,
     startInterviewSession,
     submitInterviewAnswer,
     transcribeInterviewAudio,
@@ -27,6 +28,8 @@ export default function InterviewSection() {
     const syncTimerRef = useRef(null);
     const faceMonitorRef = useRef(null);
     const fallbackMonitorRef = useRef(null);
+    const cameraRenderWatchRef = useRef(null);
+    const cameraRecoverAttemptsRef = useRef(0);
     const visibilityLockTimeoutRef = useRef(null);
     const fallbackPrevFrameRef = useRef(null);
     const proctorViolationRef = useRef(false);
@@ -36,6 +39,9 @@ export default function InterviewSection() {
     const loadingRef = useRef(false);
     const sessionRef = useRef("");
     const handsFreeRef = useRef(false);
+    const terminationInProgressRef = useRef(false);
+    const proctorActiveSinceRef = useRef(0);
+    const cameraRequestInProgressRef = useRef(false);
 
     const [duration, setDuration] = useState(15);
     const [sessionId, setSessionId] = useState("");
@@ -57,6 +63,9 @@ export default function InterviewSection() {
     const [isTranscribingAudio, setIsTranscribingAudio] = useState(false);
     const [proctorAlert, setProctorAlert] = useState("");
     const [cameraAnalysisMode, setCameraAnalysisMode] = useState("FaceDetector");
+    const [cameraDevices, setCameraDevices] = useState([]);
+    const [selectedCameraId, setSelectedCameraId] = useState("");
+    const [cameraDebug, setCameraDebug] = useState("");
 
     const [videoMetrics, setVideoMetrics] = useState({
         facialExpression: 6,
@@ -180,6 +189,7 @@ export default function InterviewSection() {
 
     useEffect(() => {
         return () => {
+            stopCameraRenderWatch();
             if (faceMonitorRef.current) {
                 clearInterval(faceMonitorRef.current);
                 faceMonitorRef.current = null;
@@ -207,6 +217,121 @@ export default function InterviewSection() {
         }
     };
 
+    const stopCameraRenderWatch = () => {
+        if (cameraRenderWatchRef.current) {
+            clearInterval(cameraRenderWatchRef.current);
+            cameraRenderWatchRef.current = null;
+        }
+    };
+
+    const startCameraRenderWatch = () => {
+        stopCameraRenderWatch();
+        cameraRenderWatchRef.current = setInterval(() => {
+            const video = videoRef.current;
+            const stream = streamRef.current;
+            if (!video || !stream || !cameraReady) {
+                return;
+            }
+
+            const hasFrame = video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0;
+            if (hasFrame) {
+                cameraRecoverAttemptsRef.current = 0;
+                return;
+            }
+
+            const playPromise = video.play?.();
+            if (playPromise && typeof playPromise.catch === "function") {
+                playPromise.catch(() => {});
+            }
+
+            cameraRecoverAttemptsRef.current += 1;
+            if (cameraRecoverAttemptsRef.current >= 4) {
+                setCameraDebug("Recovering camera stream...");
+                cameraRecoverAttemptsRef.current = 0;
+                void startCamera(selectedCameraId);
+            }
+        }, 1200);
+    };
+
+    const loadCameraDevices = async () => {
+        if (!navigator.mediaDevices?.enumerateDevices) {
+            setCameraDevices([]);
+            return;
+        }
+        try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const cameras = devices.filter((device) => device.kind === "videoinput");
+            setCameraDevices(cameras);
+            if (!selectedCameraId && cameras.length > 0) {
+                setSelectedCameraId(cameras[0].deviceId || "");
+            }
+        } catch {
+            setCameraDevices([]);
+        }
+    };
+
+    const resetInterviewState = () => {
+        setSessionId("");
+        setSecondsRemaining(0);
+        setCurrentQuestion("");
+        setTranscript("");
+        setRecognitionConfidence([]);
+        setSpeechStartedAt(null);
+        setLiveFeed([]);
+        setReport(null);
+        setError("");
+        setProctorAlert("");
+        setInterviewLocked(false);
+        setHandsFreeMode(false);
+        terminationInProgressRef.current = false;
+        proctorViolationRef.current = false;
+        multiFaceActiveRef.current = false;
+        multiFaceWarningCountRef.current = 0;
+        proctorActiveSinceRef.current = 0;
+        stopListening();
+        stopAudioRecording();
+        stopCamera();
+    };
+
+    const terminateInterviewForViolation = async (reason) => {
+        if (terminationInProgressRef.current) {
+            return;
+        }
+
+        terminationInProgressRef.current = true;
+        proctorViolationRef.current = true;
+        setInterviewLocked(true);
+        setHandsFreeMode(false);
+        stopListening();
+        stopAudioRecording();
+        setProctorAlert(reason);
+
+        const activeSessionId = sessionRef.current;
+        if (!activeSessionId) {
+            terminationInProgressRef.current = false;
+            return;
+        }
+
+        try {
+            const result = await reportInterviewProctorEvent(activeSessionId, {
+                eventType: "PROCTOR_VIOLATION",
+                details: reason,
+                terminateSession: true,
+            });
+            if (result?.finalReport) {
+                setReport(result.finalReport);
+            } else {
+                const fallbackReport = await endInterviewSession(activeSessionId);
+                setReport(fallbackReport);
+            }
+            setCurrentQuestion("");
+        } catch {
+            setError("Interview terminated due to proctoring violation.");
+        } finally {
+            terminationInProgressRef.current = false;
+        }
+    };
+
     useEffect(() => {
         if (!sessionId || !streamRef.current || !videoRef.current) {
             return;
@@ -223,8 +348,19 @@ export default function InterviewSection() {
     }, [sessionId, cameraReady]);
 
     useEffect(() => {
+        if (!sessionId || report) {
+            return;
+        }
+        void loadCameraDevices();
+    }, [sessionId, report]);
+
+    useEffect(() => {
         if (!sessionId || report || interviewLocked) {
             return undefined;
+        }
+
+        if (!proctorActiveSinceRef.current) {
+            proctorActiveSinceRef.current = Date.now();
         }
 
         const blockEvent = (event) => event.preventDefault();
@@ -241,11 +377,11 @@ export default function InterviewSection() {
         };
 
         const lockInterview = () => {
-            setHandsFreeMode(false);
-            stopListening();
-            stopAudioRecording();
-            setProctorAlert("Tab/background switch detected. Please stay on this interview screen.");
+            void terminateInterviewForViolation("Tab/background switch detected. Interview session has been terminated.");
         };
+
+        const underGracePeriod = () => Date.now() - proctorActiveSinceRef.current < 1500;
+        const shouldSkipProctorCheck = () => underGracePeriod() || cameraRequestInProgressRef.current;
 
         const onVisibilityChange = () => {
             if (document.visibilityState === "hidden") {
@@ -253,13 +389,19 @@ export default function InterviewSection() {
                     clearTimeout(visibilityLockTimeoutRef.current);
                 }
                 visibilityLockTimeoutRef.current = setTimeout(() => {
-                    if (document.visibilityState === "hidden") {
+                    if (document.visibilityState === "hidden" && !shouldSkipProctorCheck()) {
                         lockInterview();
                     }
-                }, 2500);
+                }, 250);
             } else if (visibilityLockTimeoutRef.current) {
                 clearTimeout(visibilityLockTimeoutRef.current);
                 visibilityLockTimeoutRef.current = null;
+            }
+        };
+
+        const onWindowBlur = () => {
+            if (!shouldSkipProctorCheck() && document.visibilityState === "hidden") {
+                lockInterview();
             }
         };
 
@@ -268,6 +410,7 @@ export default function InterviewSection() {
         document.addEventListener("cut", blockEvent);
         document.addEventListener("contextmenu", blockEvent);
         window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("blur", onWindowBlur);
         document.addEventListener("visibilitychange", onVisibilityChange);
 
         return () => {
@@ -280,6 +423,7 @@ export default function InterviewSection() {
             document.removeEventListener("cut", blockEvent);
             document.removeEventListener("contextmenu", blockEvent);
             window.removeEventListener("keydown", onKeyDown);
+            window.removeEventListener("blur", onWindowBlur);
             document.removeEventListener("visibilitychange", onVisibilityChange);
         };
     }, [sessionId, report, interviewLocked]);
@@ -321,18 +465,77 @@ export default function InterviewSection() {
         });
     };
 
-    const startCamera = async () => {
+    const startCamera = async (preferredDeviceId = selectedCameraId) => {
         if (!navigator.mediaDevices?.getUserMedia) {
             setError("Camera API is unavailable in this browser. Interview will continue without camera analysis.");
             setCameraReady(false);
-            return true;
+            setCameraDebug("Camera API unavailable");
+            return false;
         }
 
+        cameraRequestInProgressRef.current = true;
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+            if (streamRef.current) {
+                streamRef.current.getTracks().forEach((track) => track.stop());
+                streamRef.current = null;
+            }
+
+            let stream;
+            const baseVideoConstraints = {
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+            };
+            try {
+                if (preferredDeviceId) {
+                    stream = await navigator.mediaDevices.getUserMedia({
+                        video: {
+                            ...baseVideoConstraints,
+                            deviceId: { exact: preferredDeviceId },
+                        },
+                        audio: false,
+                    });
+                } else {
+                    stream = await navigator.mediaDevices.getUserMedia({
+                        video: {
+                            ...baseVideoConstraints,
+                            facingMode: "user",
+                        },
+                        audio: false,
+                    });
+                }
+            } catch {
+                try {
+                    const devices = await navigator.mediaDevices.enumerateDevices();
+                    const camera = devices.find((device) => device.kind === "videoinput");
+                    if (camera?.deviceId) {
+                        stream = await navigator.mediaDevices.getUserMedia({
+                            video: {
+                                deviceId: { exact: camera.deviceId },
+                                ...baseVideoConstraints,
+                            },
+                            audio: false,
+                        });
+                    } else {
+                        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+                    }
+                } catch {
+                    stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+                }
+            }
+
+            const videoTrack = stream.getVideoTracks()[0];
+            if (!videoTrack || videoTrack.readyState !== "live") {
+                throw new Error("Camera track not live");
+            }
+            videoTrack.onended = () => {
+                setCameraReady(false);
+                setCameraDebug("Camera track ended");
+            };
+
             streamRef.current = stream;
             if (videoRef.current) {
                 videoRef.current.srcObject = stream;
+                videoRef.current.muted = true;
                 const playPromise = videoRef.current.play?.();
                 if (playPromise && typeof playPromise.catch === "function") {
                     playPromise.catch(() => {});
@@ -340,13 +543,23 @@ export default function InterviewSection() {
             }
             setCameraReady(true);
             setError("");
+            const activeDeviceId = videoTrack.getSettings?.().deviceId || preferredDeviceId || "";
+            if (activeDeviceId) {
+                setSelectedCameraId(activeDeviceId);
+            }
+            setCameraDebug("Camera connected");
+            void loadCameraDevices();
+            startCameraRenderWatch();
             runVideoHeuristics();
             return true;
         } catch (error) {
             setCameraReady(false);
             const reason = error?.name ? ` (${error.name})` : "";
-            setError(`Camera start failed${reason}. Allow camera permission and click Enable Camera.`);
-            return true;
+            setError(`Camera start failed${reason}. Interview continues, but camera analytics will stay off.`);
+            setCameraDebug("Camera not connected");
+            return false;
+        } finally {
+            cameraRequestInProgressRef.current = false;
         }
     };
 
@@ -355,6 +568,7 @@ export default function InterviewSection() {
     };
 
     const stopCamera = () => {
+        stopCameraRenderWatch();
         if (faceMonitorRef.current) {
             clearInterval(faceMonitorRef.current);
             faceMonitorRef.current = null;
@@ -413,9 +627,7 @@ export default function InterviewSection() {
                     if (multiFaceWarningCountRef.current <= 2) {
                         setProctorAlert(`Warning ${multiFaceWarningCountRef.current}/2: More than one person detected. Keep only one face in camera.`);
                     } else {
-                        proctorViolationRef.current = true;
-                        setProctorAlert("Multiple-face violation exceeded limit. Interview has been terminated.");
-                        await handleEndSession();
+                        await terminateInterviewForViolation("Multiple-face violation exceeded limit. Interview has been terminated.");
                     }
                     return;
                 }
@@ -555,27 +767,14 @@ export default function InterviewSection() {
         if (interviewLocked) {
             return;
         }
-        if (!speechSupport) {
-            startAudioRecording();
+        if (isRecordingAudio) {
             return;
         }
-        if (!recognitionRef.current || isListening) {
-            return;
-        }
-        setSpeechStartedAt(Date.now());
-        recognitionRef.current.start();
-        setIsListening(true);
+        startAudioRecording();
     };
 
     const stopListening = () => {
-        if (!speechSupport) {
-            stopAudioRecording();
-            return;
-        }
-        if (!recognitionRef.current) {
-            return;
-        }
-        recognitionRef.current.stop();
+        stopAudioRecording();
         setIsListening(false);
     };
 
@@ -719,6 +918,7 @@ export default function InterviewSection() {
             setSpeechStartedAt(Date.now());
             recorder.start();
             setIsRecordingAudio(true);
+            setIsListening(true);
         } catch {
             setError("Microphone access failed. Please allow microphone permission.");
         }
@@ -732,6 +932,7 @@ export default function InterviewSection() {
             stopAudioMonitor();
         }
         setIsRecordingAudio(false);
+        setIsListening(false);
     };
 
     const startRealtimeVoiceReply = () => {
@@ -752,10 +953,13 @@ export default function InterviewSection() {
         setError("");
         try {
             proctorViolationRef.current = false;
+            terminationInProgressRef.current = false;
             multiFaceActiveRef.current = false;
             multiFaceWarningCountRef.current = 0;
             setProctorAlert("");
             setInterviewLocked(false);
+            proctorActiveSinceRef.current = Date.now();
+
             const data = await startInterviewSession(duration);
             setSessionId(data.sessionId);
             setSecondsRemaining(data.secondsRemaining || 0);
@@ -764,7 +968,9 @@ export default function InterviewSection() {
             setLiveFeed([]);
             setTranscript("");
             setRecognitionConfidence([]);
+
             void startCamera();
+
             void speakText(data.currentQuestion || "Let's begin the interview.");
         } catch (error) {
             setError(error?.message || "Unable to start interview session. Please check backend and API setup.");
@@ -872,10 +1078,12 @@ export default function InterviewSection() {
             setCurrentQuestion("");
             setHandsFreeMode(false);
             stopListening();
+            setInterviewLocked(false);
             void speakText("Interview ended. Final report generated.");
         } catch (error) {
             setError(error?.message || "Unable to end session right now.");
         } finally {
+            // Removed fullscreen exit handling
             setLoading(false);
         }
     };
@@ -960,23 +1168,21 @@ export default function InterviewSection() {
                             <div className="flex gap-2 mt-3">
                                 <button
                                     onClick={startListening}
-                                    disabled={(!speechSupport && !audioRecordSupport) || isListening || isRecordingAudio || loading || aiSpeaking || interviewLocked}
+                                    disabled={!audioRecordSupport || isListening || isRecordingAudio || loading || aiSpeaking || interviewLocked}
                                     className="px-3 py-2 rounded-md text-xs bg-[#313244] disabled:opacity-50"
                                 >
-                                    {speechSupport ? "Start Voice" : "Start Recording"}
+                                    Start Voice
                                 </button>
-                                {speechSupport && (
-                                    <button
-                                        onClick={stopListening}
-                                        disabled={!isListening}
-                                        className="px-3 py-2 rounded-md text-xs bg-[#313244] disabled:opacity-50"
-                                    >
-                                        Stop Voice
-                                    </button>
-                                )}
+                                <button
+                                    onClick={stopListening}
+                                    disabled={!isListening}
+                                    className="px-3 py-2 rounded-md text-xs bg-[#313244] disabled:opacity-50"
+                                >
+                                    Stop Voice
+                                </button>
                                 <button
                                     onClick={handsFreeMode ? stopRealtimeVoiceReply : startRealtimeVoiceReply}
-                                    disabled={!speechSupport || loading || aiSpeaking || interviewLocked}
+                                    disabled={!audioRecordSupport || loading || aiSpeaking || interviewLocked}
                                     className="px-3 py-2 rounded-md text-xs bg-[#313244] disabled:opacity-50"
                                 >
                                     {handsFreeMode ? "Stop Realtime" : "Realtime Voice Reply"}
@@ -1000,25 +1206,21 @@ export default function InterviewSection() {
                                 <div className="text-xs text-[#89b4fa] mt-2">Transcribing recorded voice...</div>
                             )}
 
-                            {!speechSupport && (
-                                <div className="text-xs text-[#fab387] mt-2">
-                                    Browser live speech recognition is unavailable. Voice recording with server transcription is enabled and auto-stops after silence.
-                                </div>
-                            )}
+                            <div className="text-xs text-[#fab387] mt-2">
+                                Voice uses backend transcription for realistic interview evaluation.
+                            </div>
 
                             {!speechSupport && isRecordingAudio && (
                                 <div className="text-xs mt-2 text-[#89b4fa]">
-                                    Recording... Keep speaking, silence detect hote hi recording auto-stop ho jayegi.
+                                    Recording... Keep speaking. Recording will stop automatically after silence is detected.
                                 </div>
                             )}
 
-                            {speechSupport && (
-                                <div className="text-xs mt-2 text-[#89b4fa]">
-                                    {isListening
-                                        ? "Listening in realtime. Your voice is being converted to text."
-                                        : "Press Start Voice or Realtime Voice Reply to answer by voice."}
-                                </div>
-                            )}
+                            <div className="text-xs mt-2 text-[#89b4fa]">
+                                {isListening
+                                    ? "Recording in realtime. Your voice will be transcribed by backend."
+                                    : "Press Start Voice or Realtime Voice Reply to answer by voice."}
+                            </div>
 
                             <div className="mt-5">
                                 <div className="text-xs text-[#6c7086] uppercase tracking-wider mb-2">Live Interview Feed</div>
@@ -1045,6 +1247,8 @@ export default function InterviewSection() {
                                 playsInline
                                 muted
                                 className="w-full h-[220px] object-cover bg-black rounded-md border border-[#313244]"
+                                onLoadedData={() => setCameraDebug("Camera connected")}
+                                onPlaying={() => setCameraDebug("Camera connected")}
                                 onLoadedMetadata={() => {
                                     const playPromise = videoRef.current?.play?.();
                                     if (playPromise && typeof playPromise.catch === "function") {
@@ -1054,6 +1258,7 @@ export default function InterviewSection() {
                             />
                             <div className="mt-3 text-xs space-y-1">
                                 <div>Camera Status: {cameraReady ? "On" : "Off"}</div>
+                                <div>Camera Health: {cameraDebug || "Waiting"}</div>
                                 <div>Candidate Visible: {cameraReady ? "Yes" : "No"}</div>
                                 <div>Analysis Mode: {cameraAnalysisMode}</div>
                                 <div>Live Confidence: {((videoMetrics.facialExpression + videoMetrics.eyeContact + videoMetrics.bodyLanguage) / 3).toFixed(1)}/10</div>
@@ -1061,6 +1266,29 @@ export default function InterviewSection() {
                                 <div>Eye Contact: {videoMetrics.eyeContact.toFixed(1)}/10</div>
                                 <div>Body Language: {videoMetrics.bodyLanguage.toFixed(1)}/10</div>
                             </div>
+
+                            {cameraDevices.length > 1 && (
+                                <div className="mt-3 space-y-2">
+                                    <select
+                                        value={selectedCameraId}
+                                        onChange={(event) => setSelectedCameraId(event.target.value)}
+                                        className="w-full bg-[#11111b] border border-[#313244] rounded-md px-2 py-2 text-xs"
+                                    >
+                                        {cameraDevices.map((camera, index) => (
+                                            <option key={camera.deviceId || index} value={camera.deviceId}>
+                                                {camera.label || `Camera ${index + 1}`}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    <button
+                                        onClick={() => startCamera(selectedCameraId)}
+                                        disabled={loading}
+                                        className="w-full px-4 py-2 rounded-md text-xs bg-[#313244] text-[#cdd6f4] disabled:opacity-50"
+                                    >
+                                        Switch Camera
+                                    </button>
+                                </div>
+                            )}
 
                             {!cameraReady && (
                                 <button
@@ -1107,6 +1335,15 @@ export default function InterviewSection() {
                         <ReportBlock title="Areas of Improvement" value={report.areasOfImprovement} />
                         <ReportBlock title="How to Improve" value={report.howToImprove} />
                         <ReportBlock title="Suggested Practice Plan" value={report.suggestedPracticePlan} />
+
+                        <div className="mt-5 flex justify-end">
+                            <button
+                                onClick={resetInterviewState}
+                                className="px-4 py-2 rounded-md text-xs bg-[#89b4fa] text-black font-semibold"
+                            >
+                                Start New Interview
+                            </button>
+                        </div>
                     </div>
                 )}
 
@@ -1118,7 +1355,7 @@ export default function InterviewSection() {
                     <div className="mt-2 text-xs text-[#fab387]">{proctorAlert}</div>
                 )}
 
-                {interviewLocked && (
+                {interviewLocked && sessionId && !report && (
                     <div className="fixed inset-0 bg-black/85 z-50 flex items-center justify-center">
                         <div className="bg-[#1e1e2e] border border-red-500/50 rounded-xl p-6 text-center max-w-xl mx-4">
                             <h2 className="text-red-400 text-lg font-bold mb-2">Interview Locked</h2>

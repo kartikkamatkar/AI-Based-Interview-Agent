@@ -4,11 +4,18 @@ export default function Home() {
   const navigate = useNavigate();
   const openCvChecker = () => navigate("/cv-checker");
   const circleButtonClass = "w-36 h-36 sm:w-40 sm:h-40 md:w-48 md:h-48 rounded-full bg-white/95 shadow-lg flex items-center justify-center text-emerald-700 font-semibold hover:scale-[1.03] transition-all duration-200 text-center p-4";
+  const tabClass = "px-4 py-2 rounded-full text-sm font-semibold bg-white/70 border border-emerald-200 hover:bg-white transition";
 
   return (
     <div className="h-screen w-screen overflow-x-hidden bg-gradient-to-br from-lime-100 via-green-100 to-emerald-200 text-emerald-950">
       <header className="max-w-7xl mx-auto flex items-center justify-between px-8 py-6">
         <h1 className="text-xl md:text-2xl font-bold text-emerald-900">EnigmaAI</h1>
+        <div className="hidden md:flex items-center gap-2">
+          <button onClick={() => navigate("/")} className={tabClass}>Home</button>
+          <button onClick={() => navigate("/interview")} className={tabClass}>Interview</button>
+          <button onClick={() => navigate("/technical-session")} className={tabClass}>Technical</button>
+          <button onClick={openCvChecker} className={tabClass}>CV Checker</button>
+        </div>
       </header>
 
       <main className="relative mx-auto pt-8 pb-24 gap-12 items-center">

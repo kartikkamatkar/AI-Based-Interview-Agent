@@ -4,6 +4,8 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
+import com.enigma.backend.interview.dto.InterviewFinalReport;
+
 public class InterviewSession {
 
     private final String sessionId;
@@ -12,11 +14,15 @@ public class InterviewSession {
     private final Instant endsAt;
     private final List<String> questionBank;
     private final List<InterviewTurnEvaluation> evaluations = new ArrayList<>();
+    private final List<String> proctorEvents = new ArrayList<>();
 
     private int questionIndex;
     private String currentQuestion;
     private boolean followUpQuestionActive;
     private boolean ended;
+    private int proctorViolationCount;
+    private String terminationReason;
+    private InterviewFinalReport finalReport;
 
     public InterviewSession(String sessionId, int durationMinutes, Instant startedAt, Instant endsAt, List<String> questionBank) {
         this.sessionId = sessionId;
@@ -28,6 +34,9 @@ public class InterviewSession {
         this.currentQuestion = questionBank.getFirst();
         this.followUpQuestionActive = false;
         this.ended = false;
+        this.proctorViolationCount = 0;
+        this.terminationReason = "";
+        this.finalReport = null;
     }
 
     public String getSessionId() {
@@ -88,5 +97,33 @@ public class InterviewSession {
 
     public int askedQuestionsCount() {
         return evaluations.size();
+    }
+
+    public List<String> getProctorEvents() {
+        return proctorEvents;
+    }
+
+    public int getProctorViolationCount() {
+        return proctorViolationCount;
+    }
+
+    public void incrementProctorViolationCount() {
+        this.proctorViolationCount += 1;
+    }
+
+    public String getTerminationReason() {
+        return terminationReason;
+    }
+
+    public void setTerminationReason(String terminationReason) {
+        this.terminationReason = terminationReason;
+    }
+
+    public InterviewFinalReport getFinalReport() {
+        return finalReport;
+    }
+
+    public void setFinalReport(InterviewFinalReport finalReport) {
+        this.finalReport = finalReport;
     }
 }

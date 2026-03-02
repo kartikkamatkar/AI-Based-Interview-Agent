@@ -4,6 +4,8 @@ import com.enigma.backend.ai.AiAnalysisService;
 import com.enigma.backend.common.ApiResponse;
 import com.enigma.backend.interview.dto.InterviewAnswerRequest;
 import com.enigma.backend.interview.dto.InterviewFinalReport;
+import com.enigma.backend.interview.dto.InterviewProctorEventRequest;
+import com.enigma.backend.interview.dto.InterviewProctorEventResponse;
 import com.enigma.backend.interview.dto.InterviewSessionStateResponse;
 import com.enigma.backend.interview.dto.InterviewStartRequest;
 import com.enigma.backend.interview.dto.InterviewStartResponse;
@@ -52,6 +54,15 @@ public class InterviewController {
     ) {
         InterviewTurnResponse response = interviewService.submitAnswer(sessionId, request);
         return ApiResponse.ok(response, "Interview answer evaluated");
+    }
+
+    @PostMapping("/session/{sessionId}/proctor-event")
+    public ApiResponse<InterviewProctorEventResponse> reportProctorEvent(
+            @PathVariable String sessionId,
+            @RequestBody InterviewProctorEventRequest request
+    ) {
+        InterviewProctorEventResponse response = interviewService.reportProctorEvent(sessionId, request);
+        return ApiResponse.ok(response, "Proctor event captured");
     }
 
     @PostMapping("/session/{sessionId}/end")
