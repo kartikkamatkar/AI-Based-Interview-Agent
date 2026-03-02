@@ -1,0 +1,4 @@
+pdfplumber 
+python-docx 
+spacy 
+streamlit
