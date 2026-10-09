@@ -67,7 +67,7 @@ Typical backend variables:
 
 ## Security / Credentials
 
-- Never commit API keys or DB passwords into tracked files.
+- Never commit API keys or DB passwords into tracked files..
 - Keep secrets only in local env files.
 - `.gitignore` is configured to ignore common secret files and key material.
 
