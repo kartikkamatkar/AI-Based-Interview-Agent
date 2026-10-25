@@ -74,4 +74,4 @@ Typical backend variables:
 ## Notes
 
 - Backend currently reads optional local config from `.env.local` paths as configured in `backend/src/main/resources/application.properties`.
-- If camera/mic behavior depends on browser permissions, use latest Chrome/Edge on `localhost`.
+- If camera/mic behavior depends on browser permissions, use latest Chrome/Edge on `localhost`..
