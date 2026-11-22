@@ -1,6 +1,7 @@
 # AI Interview Agent (Enigma)
 
 End-to-end interview preparation platform with:
+
 - **Frontend (React + Vite)** for DSA solver, HR interview, technical interview, CV checker
 - **Backend (Spring Boot + PostgreSQL)** for APIs, AI analysis, interview flow, proctor events
 - **CV Checker service (Python/Flask)** for resume-related processing (optional based on flow)
