@@ -19,7 +19,7 @@ End-to-end interview preparation platform with:
 - **Java** 21 (JDK)
 - **Maven** 3.9+
 - **PostgreSQL** running locally
-- **Python** 3.10+ (for `cv_checker`, optional)
+- **Python** 3.10+ (for `cv_checker`,optional)
 
 ## Quick Start
 
